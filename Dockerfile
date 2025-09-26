@@ -1,17 +1,17 @@
-FROM python:3.11-slim
+FROM python:3.9-slim
 
-# Install LibreOffice
-RUN apt-get update && apt-get install -y libreoffice && rm -rf /var/lib/apt/lists/*
+# Install system dependencies including LibreOffice
+RUN apt-get update && apt-get install -y \
+    libreoffice \
+    libreoffice-writer \
+    fonts-liberation \
+    && rm -rf /var/lib/apt/lists/*
 
-# Set workdir
 WORKDIR /app
-
-# Install dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install -r requirements.txt
 
-# Copy app
 COPY . .
 
-# Run Flask app
+EXPOSE 5000
 CMD ["python", "app.py"]
