@@ -1,17 +1,21 @@
 FROM python:3.9-slim
 
-# Install system dependencies including LibreOffice
+# Install system dependencies (fonts are useful for PDFs)
 RUN apt-get update && apt-get install -y \
-    libreoffice \
-    libreoffice-writer \
     fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install -r requirements.txt
 
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy app code
 COPY . .
 
-EXPOSE 5000
-CMD ["python", "app.py"]
+# Expose FastAPI port
+EXPOSE 8000
+
+# Run the FastAPI app with uvicorn
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
