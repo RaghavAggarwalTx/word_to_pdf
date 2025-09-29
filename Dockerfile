@@ -1,21 +1,28 @@
-FROM python:3.9-slim
+FROM python:3.11-slim
 
-# Install system dependencies (fonts are useful for PDFs)
+# Install LibreOffice and required dependencies
 RUN apt-get update && apt-get install -y \
+    libreoffice \
+    libreoffice-writer \
     fonts-liberation \
+    fonts-dejavu \
+    fonts-noto \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install Python dependencies
+# Copy requirements and install Python packages
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy app code
+# Copy application code
 COPY . .
 
-# Expose FastAPI port
-EXPOSE 8000
+# Create directories for uploads and outputs
+RUN mkdir -p uploads outputs
 
-# Run the FastAPI app with uvicorn
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+# Expose port
+EXPOSE 8080
+
+# Start the application
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
