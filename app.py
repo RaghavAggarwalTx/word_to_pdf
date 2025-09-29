@@ -5,7 +5,7 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import inch
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uuid
 import asyncio
@@ -81,7 +81,6 @@ async def convert_docx_to_pdf(
     return_file: bool = Form(default=True)
 ):
     """Convert DOCX to PDF (sync). Works directly with n8n HTTP Request node."""
-
     if not file.filename.lower().endswith('.docx'):
         raise HTTPException(status_code=400, detail="File must be a .docx document")
 
@@ -92,7 +91,7 @@ async def convert_docx_to_pdf(
     output_path = OUTPUT_DIR / output_filename
 
     try:
-        # Save input file
+        # Save uploaded DOCX
         async with aiofiles.open(input_path, 'wb') as f:
             content = await file.read()
             await f.write(content)
@@ -100,16 +99,24 @@ async def convert_docx_to_pdf(
         logger.info(f"Converting {file.filename}...")
 
         success = await convert_file(str(input_path), str(output_path))
-
         if not success or not output_path.exists():
             raise HTTPException(status_code=500, detail="Conversion failed")
 
         if return_file:
-            return FileResponse(
+            response = FileResponse(
                 path=output_path,
                 filename=f"{Path(file.filename).stem}.pdf",
                 media_type='application/pdf'
             )
+
+            # Schedule PDF cleanup after response
+            async def cleanup_pdf():
+                await asyncio.sleep(1)
+                if output_path.exists():
+                    output_path.unlink()
+            asyncio.create_task(cleanup_pdf())
+
+            return response
         else:
             return {
                 "success": True,
@@ -118,22 +125,36 @@ async def convert_docx_to_pdf(
             }
 
     finally:
+        # Cleanup uploaded DOCX
         if input_path.exists():
             input_path.unlink()
 
 
 @app.get("/download/{filename}")
 async def download_file(filename: str):
+    """Download generated PDF (cleanup after sending)"""
     file_path = OUTPUT_DIR / filename
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
 
-    return FileResponse(
+    response = FileResponse(
         path=file_path,
         filename=filename,
         media_type='application/pdf'
     )
-@app.get("/")
-async def root():
-    return {"message": "DOCX to PDF Converter API is running!"}
 
+    # Schedule cleanup of PDF
+    async def cleanup_pdf():
+        await asyncio.sleep(1)
+        if file_path.exists():
+            file_path.unlink()
+    asyncio.create_task(cleanup_pdf())
+
+    return response
+
+
+@app.get("/", include_in_schema=False)
+@app.head("/", include_in_schema=False)
+async def root():
+    """Health check for Render"""
+    return JSONResponse({"message": "DOCX to PDF Converter API is running!"})
