@@ -133,3 +133,7 @@ async def download_file(filename: str):
         filename=filename,
         media_type='application/pdf'
     )
+@app.get("/")
+async def root():
+    return {"message": "DOCX to PDF Converter API is running!"}
+
