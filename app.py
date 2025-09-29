@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-from docx import Document
-from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.lib.units import inch
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,6 +7,8 @@ import asyncio
 from pathlib import Path
 import aiofiles
 import logging
+import subprocess
+import shutil
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -19,8 +16,8 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="DOCX to PDF Converter API",
-    description="Convert DOCX files to PDF format - n8n compatible",
-    version="1.0.0"
+    description="Convert DOCX files to PDF format with full formatting preservation",
+    version="2.0.0"
 )
 
 # Enable CORS for n8n integration
@@ -38,41 +35,55 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 
-class ConversionMethods:
-    @staticmethod
-    async def convert_with_reportlab(input_path: str, output_path: str) -> bool:
-        """Convert using ReportLab + python-docx"""
-        try:
-            loop = asyncio.get_event_loop()
-
-            def _convert():
-                doc = Document(input_path)
-                pdf_doc = SimpleDocTemplate(output_path, pagesize=letter)
-                styles = getSampleStyleSheet()
-                story = []
-
-                for paragraph in doc.paragraphs:
-                    if paragraph.text.strip():
-                        style = styles['Normal']
-                        if paragraph.style.name.startswith('Heading'):
-                            style = styles['Heading1']
-                        p = Paragraph(paragraph.text, style)
-                        story.append(p)
-                        story.append(Spacer(1, 0.1 * inch))
-
-                pdf_doc.build(story)
-                return True
-
-            await loop.run_in_executor(None, _convert)
-            return True
-        except Exception as e:
-            logger.error(f"Conversion failed: {e}")
-            return False
-
-
-async def convert_file(input_path: str, output_path: str) -> bool:
-    """Convert DOCX to PDF"""
-    return await ConversionMethods.convert_with_reportlab(input_path, output_path)
+async def convert_with_libreoffice(input_path: Path, output_dir: Path) -> Path:
+    """
+    Convert DOCX to PDF using LibreOffice (preserves all formatting)
+    """
+    try:
+        loop = asyncio.get_event_loop()
+        
+        def _convert():
+            # Check if LibreOffice is installed
+            if not shutil.which('libreoffice'):
+                raise Exception("LibreOffice is not installed")
+            
+            # Run LibreOffice conversion
+            cmd = [
+                'libreoffice',
+                '--headless',
+                '--convert-to', 'pdf',
+                '--outdir', str(output_dir),
+                str(input_path)
+            ]
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120  # 2 minute timeout
+            )
+            
+            if result.returncode != 0:
+                logger.error(f"LibreOffice error: {result.stderr}")
+                raise Exception(f"LibreOffice conversion failed: {result.stderr}")
+            
+            # LibreOffice creates PDF with same name as input
+            output_filename = input_path.stem + '.pdf'
+            output_path = output_dir / output_filename
+            
+            if not output_path.exists():
+                raise Exception("PDF was not created")
+            
+            return output_path
+        
+        output_path = await loop.run_in_executor(None, _convert)
+        return output_path
+        
+    except subprocess.TimeoutExpired:
+        raise Exception("Conversion timeout - file may be too large or complex")
+    except Exception as e:
+        logger.error(f"Conversion failed: {e}")
+        raise Exception(f"Conversion error: {str(e)}")
 
 
 @app.post("/convert")
@@ -80,15 +91,16 @@ async def convert_docx_to_pdf(
     file: UploadFile = File(...),
     return_file: bool = Form(default=True)
 ):
-    """Convert DOCX to PDF (sync). Works directly with n8n HTTP Request node."""
+    """
+    Convert DOCX to PDF with full formatting preservation.
+    Works directly with n8n HTTP Request node.
+    """
     if not file.filename.lower().endswith('.docx'):
         raise HTTPException(status_code=400, detail="File must be a .docx document")
 
     job_id = str(uuid.uuid4())
     input_filename = f"{job_id}_{file.filename}"
-    output_filename = f"{job_id}_{Path(file.filename).stem}.pdf"
     input_path = UPLOAD_DIR / input_filename
-    output_path = OUTPUT_DIR / output_filename
 
     try:
         # Save uploaded DOCX
@@ -96,46 +108,60 @@ async def convert_docx_to_pdf(
             content = await file.read()
             await f.write(content)
 
-        logger.info(f"Converting {file.filename}...")
+        logger.info(f"Converting {file.filename} using LibreOffice...")
 
-        success = await convert_file(str(input_path), str(output_path))
-        if not success or not output_path.exists():
-            raise HTTPException(status_code=500, detail="Conversion failed")
+        # Convert using LibreOffice
+        output_path = await convert_with_libreoffice(input_path, OUTPUT_DIR)
+        
+        if not output_path.exists():
+            raise HTTPException(status_code=500, detail="Conversion failed - PDF not created")
+
+        logger.info(f"Conversion successful: {output_path.name}")
 
         if return_file:
+            # Return PDF file directly
             response = FileResponse(
                 path=output_path,
                 filename=f"{Path(file.filename).stem}.pdf",
                 media_type='application/pdf'
             )
 
-            # Schedule PDF cleanup after response
-            async def cleanup_pdf():
-                await asyncio.sleep(1)
+            # Schedule cleanup after response is sent
+            async def cleanup_files():
+                await asyncio.sleep(2)
                 if output_path.exists():
                     output_path.unlink()
-            asyncio.create_task(cleanup_pdf())
+                    logger.info(f"Cleaned up: {output_path.name}")
+            
+            asyncio.create_task(cleanup_files())
 
             return response
         else:
+            # Return JSON with download URL
             return {
                 "success": True,
-                "output_filename": output_filename,
-                "download_url": f"/download/{output_filename}"
+                "output_filename": output_path.name,
+                "download_url": f"/download/{output_path.name}"
             }
 
+    except Exception as e:
+        logger.error(f"Error processing file: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    
     finally:
-        # Cleanup uploaded DOCX
+        # Always cleanup uploaded DOCX
         if input_path.exists():
             input_path.unlink()
+            logger.info(f"Cleaned up input: {input_filename}")
 
 
 @app.get("/download/{filename}")
 async def download_file(filename: str):
     """Download generated PDF (cleanup after sending)"""
     file_path = OUTPUT_DIR / filename
+    
     if not file_path.exists():
-        raise HTTPException(status_code=404, detail="File not found")
+        raise HTTPException(status_code=404, detail="File not found or already downloaded")
 
     response = FileResponse(
         path=file_path,
@@ -143,18 +169,37 @@ async def download_file(filename: str):
         media_type='application/pdf'
     )
 
-    # Schedule cleanup of PDF
+    # Schedule cleanup after download
     async def cleanup_pdf():
-        await asyncio.sleep(1)
+        await asyncio.sleep(2)
         if file_path.exists():
             file_path.unlink()
+            logger.info(f"Cleaned up downloaded file: {filename}")
+    
     asyncio.create_task(cleanup_pdf())
 
     return response
 
 
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    # Check if LibreOffice is available
+    libreoffice_available = shutil.which('libreoffice') is not None
+    
+    return {
+        "status": "healthy",
+        "libreoffice_installed": libreoffice_available,
+        "version": "2.0.0"
+    }
+
+
 @app.get("/", include_in_schema=False)
 @app.head("/", include_in_schema=False)
 async def root():
-    """Health check for Render"""
-    return JSONResponse({"message": "DOCX to PDF Converter API is running!"})
+    """Root endpoint for Render health checks"""
+    return JSONResponse({
+        "message": "DOCX to PDF Converter API is running!",
+        "docs": "/docs",
+        "health": "/health"
+    })
